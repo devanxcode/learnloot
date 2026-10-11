@@ -33,10 +33,12 @@ interface WorkspaceContextType {
   // Theme
   toggleTheme: () => void;
 
-  // Subjects & Chapters
-  addChapter: (subjectId: string, name: string) => void;
-  toggleChapterCompletion: (chapterId: string) => void;
-  deleteChapter: (chapterId: string) => void;
+  // Subjects & Chapters (Live Cloud Synced)
+  addSubject: (name: string, color?: string, targetHours?: number) => Promise<void>;
+  deleteSubject: (subjectId: string) => Promise<void>;
+  addChapter: (subjectId: string, name: string) => Promise<void>;
+  toggleChapterCompletion: (chapterId: string) => Promise<void>;
+  deleteChapter: (chapterId: string) => Promise<void>;
 
   // Study Logs
   addStudyLog: (log: Omit<StudyLog, 'id'>, markChapterComplete?: boolean) => void;
@@ -56,7 +58,7 @@ const STORAGE_PREFIX = 'devanand_study_v1_';
 
 export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const [isLoaded, setIsLoaded] = useState(false);
-  const [subjects] = useState<Subject[]>(initialSubjects);
+  const [subjects, setSubjects] = useState<Subject[]>(initialSubjects);
   const [chapters, setChapters] = useState<Chapter[]>(initialChapters);
   const [studyLogs, setStudyLogs] = useState<StudyLog[]>(initialStudyLogs);
   const [redemptions, setRedemptions] = useState<RedemptionItem[]>([]);
@@ -69,14 +71,26 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     async function loadCloudData() {
       if (supabase) {
         try {
-          const [logsRes, redemptionsRes, chaptersRes] = await Promise.all([
+          const [subjectsRes, logsRes, redemptionsRes, chaptersRes] = await Promise.all([
+            supabase.from('subjects').select('*').order('created_at', { ascending: true }),
             supabase.from('study_logs').select('*').order('created_at', { ascending: false }),
             supabase.from('redemption_requests').select('*').order('created_at', { ascending: false }),
-            supabase.from('chapters').select('*'),
+            supabase.from('chapters').select('*').order('created_at', { ascending: true }),
           ]);
 
           if (isSubscribed) {
-            if (logsRes.data && logsRes.data.length > 0) {
+            if (subjectsRes.data) {
+              setSubjects(
+                subjectsRes.data.map((s: any) => ({
+                  id: s.id,
+                  name: s.name,
+                  color: s.color || '#60A5FA',
+                  target_hours: Number(s.target_hours) || 50,
+                }))
+              );
+            }
+
+            if (logsRes.data) {
               setStudyLogs(
                 logsRes.data.map((l: any) => {
                   const duration = Number(l.duration_minutes) || 0;
@@ -86,20 +100,18 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
                       : Math.max(1, Math.floor(duration / 15));
                   return {
                     id: l.id,
-                    subject_id: l.subject_id || 'sub-1',
+                    subject_id: l.subject_id || '',
                     chapter_id: l.chapter_id || undefined,
                     date: l.date,
                     duration_minutes: duration,
                     notes: l.notes || l.topic || '',
-                    questions_solved: Number(l.questions_solved) || 0,
-                    confidence_rating: Number(l.confidence_rating) || 3,
                     xp_awarded: xp,
                   };
                 })
               );
             }
 
-            if (redemptionsRes.data && redemptionsRes.data.length > 0) {
+            if (redemptionsRes.data) {
               setRedemptions(
                 redemptionsRes.data.map((r: any) => ({
                   id: r.id,
@@ -112,15 +124,13 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
               );
             }
 
-            if (chaptersRes.data && chaptersRes.data.length > 0) {
+            if (chaptersRes.data) {
               setChapters(
                 chaptersRes.data.map((c: any) => ({
                   id: c.id,
                   subject_id: c.subject_id,
                   name: c.name,
-                  target_date: c.target_date || '',
                   completed: c.status === 'completed',
-                  confidence_rating: c.confidence_rating || 3,
                 }))
               );
             }
@@ -286,25 +296,117 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     }));
   };
 
-  const addChapter = (subjectId: string, name: string) => {
+  const addSubject = async (name: string, color = '#60A5FA', targetHours = 50) => {
     if (!name.trim()) return;
+    const tempId = 'sub-' + Date.now();
+    const newSub: Subject = {
+      id: tempId,
+      name: name.trim(),
+      color,
+      target_hours: targetHours,
+    };
+    setSubjects(prev => [...prev, newSub]);
+
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('subjects')
+          .insert({
+            name: name.trim(),
+            color,
+            target_hours: targetHours,
+          })
+          .select()
+          .single();
+
+        if (data && !error) {
+          setSubjects(prev => prev.map(s => (s.id === tempId ? { ...s, id: data.id } : s)));
+        }
+      } catch (err) {
+        console.warn('Supabase addSubject error:', err);
+      }
+    }
+  };
+
+  const deleteSubject = async (subjectId: string) => {
+    setSubjects(prev => prev.filter(s => s.id !== subjectId));
+    setChapters(prev => prev.filter(c => c.subject_id !== subjectId));
+    if (supabase) {
+      try {
+        await supabase.from('subjects').delete().eq('id', subjectId);
+      } catch (err) {
+        console.warn('Supabase deleteSubject error:', err);
+      }
+    }
+  };
+
+  const addChapter = async (subjectId: string, name: string) => {
+    if (!name.trim()) return;
+    const tempId = 'ch-' + Date.now();
     const newChap: Chapter = {
-      id: 'ch-' + Date.now(),
+      id: tempId,
       subject_id: subjectId,
       name: name.trim(),
       completed: false,
     };
     setChapters(prev => [...prev, newChap]);
+
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('chapters')
+          .insert({
+            subject_id: subjectId,
+            name: name.trim(),
+            status: 'not_started',
+          })
+          .select()
+          .single();
+
+        if (data && !error) {
+          setChapters(prev => prev.map(c => (c.id === tempId ? { ...c, id: data.id } : c)));
+        }
+      } catch (err) {
+        console.warn('Supabase addChapter error:', err);
+      }
+    }
   };
 
-  const toggleChapterCompletion = (chapterId: string) => {
+  const toggleChapterCompletion = async (chapterId: string) => {
+    let nextStatus = false;
     setChapters(prev =>
-      prev.map(c => (c.id === chapterId ? { ...c, completed: !c.completed } : c))
+      prev.map(c => {
+        if (c.id === chapterId) {
+          nextStatus = !c.completed;
+          return { ...c, completed: nextStatus };
+        }
+        return c;
+      })
     );
+
+    if (supabase) {
+      try {
+        await supabase
+          .from('chapters')
+          .update({
+            status: nextStatus ? 'completed' : 'not_started',
+          })
+          .eq('id', chapterId);
+      } catch (err) {
+        console.warn('Supabase toggleChapter error:', err);
+      }
+    }
   };
 
-  const deleteChapter = (chapterId: string) => {
+  const deleteChapter = async (chapterId: string) => {
     setChapters(prev => prev.filter(c => c.id !== chapterId));
+    if (supabase) {
+      try {
+        await supabase.from('chapters').delete().eq('id', chapterId);
+      } catch (err) {
+        console.warn('Supabase deleteChapter error:', err);
+      }
+    }
   };
 
   const addStudyLog = (logData: Omit<StudyLog, 'id'>, markChapterComplete?: boolean) => {
@@ -449,6 +551,8 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         consecutiveStreak,
         totalRupeeValuation,
         toggleTheme,
+        addSubject,
+        deleteSubject,
         addChapter,
         toggleChapterCompletion,
         deleteChapter,
