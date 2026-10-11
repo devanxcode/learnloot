@@ -62,69 +62,95 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const [redemptions, setRedemptions] = useState<RedemptionItem[]>([]);
   const [settings, setSettings] = useState<UserSettings>(initialSettings);
 
-  // Load from LocalStorage
+  // Cloud-First Data Hydration: Read directly from Supabase Cloud Database
   useEffect(() => {
-    try {
-      const getStored = (key: string) => {
-        const item = localStorage.getItem(STORAGE_PREFIX + key);
-        return item ? JSON.parse(item) : null;
-      };
+    let isSubscribed = true;
 
-      if (getStored('chapters')) setChapters(getStored('chapters'));
-      if (getStored('studyLogs')) {
-        const rawLogs = getStored('studyLogs');
-        if (Array.isArray(rawLogs)) {
-          setStudyLogs(rawLogs.map((l: any) => {
-            const duration = Number(l.duration_minutes) || 0;
-            const xp = l.xp_awarded !== undefined
-              ? Number(l.xp_awarded)
-              : Math.max(1, Math.floor(duration / 15));
-            return {
-              ...l,
-              duration_minutes: duration,
-              xp_awarded: xp,
-            };
-          }));
+    async function loadCloudData() {
+      if (supabase) {
+        try {
+          const [logsRes, redemptionsRes, chaptersRes] = await Promise.all([
+            supabase.from('study_logs').select('*').order('created_at', { ascending: false }),
+            supabase.from('redemption_requests').select('*').order('created_at', { ascending: false }),
+            supabase.from('chapters').select('*'),
+          ]);
+
+          if (isSubscribed) {
+            if (logsRes.data && logsRes.data.length > 0) {
+              setStudyLogs(
+                logsRes.data.map((l: any) => {
+                  const duration = Number(l.duration_minutes) || 0;
+                  const xp =
+                    l.xp_awarded !== undefined
+                      ? Number(l.xp_awarded)
+                      : Math.max(1, Math.floor(duration / 15));
+                  return {
+                    id: l.id,
+                    subject_id: l.subject_id || 'sub-1',
+                    chapter_id: l.chapter_id || undefined,
+                    date: l.date,
+                    duration_minutes: duration,
+                    notes: l.notes || l.topic || '',
+                    questions_solved: Number(l.questions_solved) || 0,
+                    confidence_rating: Number(l.confidence_rating) || 3,
+                    xp_awarded: xp,
+                  };
+                })
+              );
+            }
+
+            if (redemptionsRes.data && redemptionsRes.data.length > 0) {
+              setRedemptions(
+                redemptionsRes.data.map((r: any) => ({
+                  id: r.id,
+                  xp_spent: Number(r.coins_amount) || 0,
+                  rupee_value: Number(r.rupee_amount) || 0,
+                  payout_method: r.payout_method || 'UPI',
+                  destination: r.payout_destination || '',
+                  date: (r.created_at || '').split('T')[0] || new Date().toISOString().split('T')[0],
+                }))
+              );
+            }
+
+            if (chaptersRes.data && chaptersRes.data.length > 0) {
+              setChapters(
+                chaptersRes.data.map((c: any) => ({
+                  id: c.id,
+                  subject_id: c.subject_id,
+                  name: c.name,
+                  target_date: c.target_date || '',
+                  completed: c.status === 'completed',
+                  confidence_rating: c.confidence_rating || 3,
+                }))
+              );
+            }
+          }
+        } catch (err) {
+          console.warn('Cloud database fetch notice:', err);
         }
       }
-      if (getStored('redemptions')) {
-        const rawReds = getStored('redemptions');
-        if (Array.isArray(rawReds)) {
-          setRedemptions(rawReds.map((r: any) => ({
-            ...r,
-            xp_spent: Number(r.xp_spent) || 0,
-            rupee_value: Number(r.rupee_value) || 0,
-          })));
-        }
+      if (isSubscribed) {
+        setIsLoaded(true);
       }
-      if (getStored('settings')) setSettings(getStored('settings'));
-    } catch (e) {
-      console.warn('LocalStorage load error:', e);
-    } finally {
-      setIsLoaded(true);
     }
+
+    loadCloudData();
+
+    return () => {
+      isSubscribed = false;
+    };
   }, []);
 
-  // Save to LocalStorage
+  // Sync theme changes
   useEffect(() => {
-    if (!isLoaded) return;
-    try {
-      localStorage.setItem(STORAGE_PREFIX + 'chapters', JSON.stringify(chapters));
-      localStorage.setItem(STORAGE_PREFIX + 'studyLogs', JSON.stringify(studyLogs));
-      localStorage.setItem(STORAGE_PREFIX + 'redemptions', JSON.stringify(redemptions));
-      localStorage.setItem(STORAGE_PREFIX + 'settings', JSON.stringify(settings));
-
-      if (settings.theme === 'light') {
-        document.documentElement.classList.remove('dark');
-        document.documentElement.classList.add('light');
-      } else {
-        document.documentElement.classList.remove('light');
-        document.documentElement.classList.add('dark');
-      }
-    } catch (e) {
-      console.error('LocalStorage save error:', e);
+    if (settings.theme === 'light') {
+      document.documentElement.classList.remove('dark');
+      document.documentElement.classList.add('light');
+    } else {
+      document.documentElement.classList.remove('light');
+      document.documentElement.classList.add('dark');
     }
-  }, [isLoaded, chapters, studyLogs, redemptions, settings]);
+  }, [settings.theme]);
 
   // RULE: 15 minutes of study = 1 XP (minimum 1 XP per logged session)
   // Chapters finished award bonus XP (+10 XP per chapter)
